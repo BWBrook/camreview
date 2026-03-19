@@ -9,6 +9,11 @@ from .gui import launch_app
 app = typer.Typer(help="PySide6 desktop reviewer for first-pass camera-trap image screening.")
 
 
+@app.callback()
+def main() -> None:
+    """camreview command group."""
+
+
 @app.command()
 def review(region_root: Path) -> None:
     """Launch the desktop reviewer against a region root."""
