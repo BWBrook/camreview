@@ -1,0 +1,34 @@
+[project]
+name = "camreview"
+version = "0.1.0"
+description = "PySide6 desktop reviewer for first-pass camera-trap image screening"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "Pillow>=10,<12",
+  "PySide6>=6.8,<7",
+  "send2trash>=1.8,<2",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "pytest-qt>=4.4,<5",
+  "ruff>=0.11,<1",
+]
+
+[project.scripts]
+camreview = "camreview.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
