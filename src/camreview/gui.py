@@ -99,6 +99,8 @@ class MainWindow(QMainWindow):
         self.current_images: list[ImageRecord] = []
         self.current_index = 0
         self._loading_note = False
+        self._loaded_folder_name: str | None = None
+        self._thumbnail_cache: dict[str, QIcon] = {}
 
         self._build_ui()
         self._build_menu()
@@ -253,15 +255,18 @@ class MainWindow(QMainWindow):
     def load_folder(self, folder_name: str, *, target_index: int | None = None, target_image_id: int | None = None) -> None:
         self.current_folder_name = folder_name
         self.current_images = self.controller.open_folder(folder_name)
-        self.thumbnail_list.blockSignals(True)
-        self.thumbnail_list.clear()
-        for image in self.current_images:
-            item = QListWidgetItem(image.filename)
-            item.setData(Qt.UserRole, image.image_id)
-            if image.current_relpath:
-                item.setIcon(self._thumbnail_icon(self.controller.region_root / image.current_relpath))
-            self.thumbnail_list.addItem(item)
-        self.thumbnail_list.blockSignals(False)
+        if self._loaded_folder_name != folder_name:
+            self._thumbnail_cache.clear()
+            self.thumbnail_list.blockSignals(True)
+            self.thumbnail_list.clear()
+            for image in self.current_images:
+                item = QListWidgetItem(image.filename)
+                item.setData(Qt.UserRole, image.image_id)
+                if image.current_relpath:
+                    item.setIcon(self._thumbnail_icon(self.controller.region_root / image.current_relpath))
+                self.thumbnail_list.addItem(item)
+            self.thumbnail_list.blockSignals(False)
+            self._loaded_folder_name = folder_name
 
         if not self.current_images:
             self.current_index = 0
@@ -287,11 +292,46 @@ class MainWindow(QMainWindow):
             self.viewer.setFocus()
 
     def _thumbnail_icon(self, path: Path) -> QIcon:
+        cache_key = str(path)
+        cached = self._thumbnail_cache.get(cache_key)
+        if cached is not None:
+            return cached
         with Image.open(path) as image:
             prepared = ImageOps.exif_transpose(image).convert("RGB")
             prepared.thumbnail((110, 80))
             icon = QPixmap.fromImage(ImageQt(prepared))
-        return QIcon(icon)
+        qicon = QIcon(icon)
+        self._thumbnail_cache[cache_key] = qicon
+        return qicon
+
+    def _folder_list_item(self, folder_name: str) -> QListWidgetItem | None:
+        for row in range(self.folder_list.count()):
+            item = self.folder_list.item(row)
+            if item.data(Qt.UserRole) == folder_name:
+                return item
+        return None
+
+    def _update_folder_list_item(self, folder_name: str) -> None:
+        item = self._folder_list_item(folder_name)
+        if item is None:
+            return
+        folder = self.controller.store.get_folder(folder_name)
+        item.setText(self._folder_text(folder))
+        item.setForeground(STATUS_COLORS[folder.status])
+
+    def _refresh_current_folder_after_edit(self, *, target_index: int | None = None) -> None:
+        if self.current_folder_name is None:
+            return
+        self.current_images = self.controller.images(self.current_folder_name)
+        if self.current_images:
+            if target_index is None:
+                self.current_index = min(self.current_index, len(self.current_images) - 1)
+            else:
+                self.current_index = max(0, min(target_index, len(self.current_images) - 1))
+        else:
+            self.current_index = 0
+        self._update_folder_list_item(self.current_folder_name)
+        self._refresh_current_image()
 
     def _refresh_current_image(self) -> None:
         folder = self.controller.store.get_folder(self.current_folder_name) if self.current_folder_name else None
@@ -392,8 +432,7 @@ class MainWindow(QMainWindow):
             self._show_error(str(exc))
             return
         next_index = self.current_index + 1 if auto_advance and self.current_index < len(self.current_images) - 1 else self.current_index
-        self.refresh_folders(preferred_folder=self.current_folder_name)
-        self.load_folder(self.current_folder_name, target_index=next_index)
+        self._refresh_current_folder_after_edit(target_index=next_index)
 
     def undo_last(self) -> None:
         if self.current_folder_name is None:
@@ -401,8 +440,7 @@ class MainWindow(QMainWindow):
         if not self.controller.undo_last(self.current_folder_name):
             self.statusBar().showMessage("Nothing to undo")
             return
-        self.refresh_folders(preferred_folder=self.current_folder_name)
-        self.load_folder(self.current_folder_name, target_index=self.current_index)
+        self._refresh_current_folder_after_edit(target_index=self.current_index)
 
     def _save_note(self) -> None:
         if self._loading_note or not self.current_images:
