@@ -22,6 +22,8 @@ def test_initial_scan_creates_output_dirs_and_registers_images(make_region) -> N
         "12_2_01-01-2020_09-00-00.jpg",
         "12_2_01-01-2020_10-00-00.jpg",
     ]
+    assert all(image.review_label == ReviewLabel.BLANK for image in images)
+    assert all(image.reviewed_at is None for image in images)
     assert images[-1].parse_warning is not None
     store.close()
 
@@ -42,6 +44,24 @@ def test_site_photo_reassignment_demotes_previous_exemplar(make_region) -> None:
     updated = store.get_images("12_2")
     assert updated[0].review_label == ReviewLabel.BLANK
     assert updated[1].review_label == ReviewLabel.SITE_PHOTO
+    store.close()
+
+
+def test_mark_reviewed_tracks_progress_without_explicit_blank_tag(make_region) -> None:
+    root = make_region(
+        {
+            "12_2": [
+                "12_2_01-01-2020_09-00-00.jpg",
+                "12_2_01-01-2020_10-00-00.jpg",
+            ]
+        }
+    )
+    store = ProjectStore(root)
+    images = store.get_images("12_2")
+    store.mark_reviewed(images[0].image_id)
+    folder = store.get_folder("12_2")
+    assert folder.reviewed_images == 1
+    assert folder.status == FolderStatus.IN_PROGRESS
     store.close()
 
 
@@ -99,4 +119,33 @@ def test_rescan_flags_external_move(make_region) -> None:
     image_path.rename(moved)
     store.reconcile()
     assert store.get_folder("12_2").status == FolderStatus.ERROR
+    store.close()
+
+
+def test_cleanup_all_committed_folders(make_region) -> None:
+    root = make_region(
+        {
+            "12_2": [
+                "12_2_01-01-2020_09-00-00.jpg",
+                "12_2_01-01-2020_10-00-00.jpg",
+            ],
+            "13_1": [
+                "13_1_01-01-2020_09-00-00.jpg",
+                "13_1_01-01-2020_10-00-00.jpg",
+            ],
+        }
+    )
+    store = ProjectStore(root)
+    for folder_name in ["12_2", "13_1"]:
+        images = store.get_images(folder_name)
+        store.mark_reviewed(images[0].image_id)
+        store.set_label(images[1].image_id, ReviewLabel.SITE_PHOTO)
+        store.commit_folder(folder_name)
+    plans = store.preview_cleanup_all_committed()
+    assert [plan.folder_name for plan in plans] == ["12_2", "13_1"]
+    store.cleanup_all_committed()
+    assert store.get_folder("12_2").status == FolderStatus.DONE
+    assert store.get_folder("13_1").status == FolderStatus.DONE
+    assert not (root / "12_2").exists()
+    assert not (root / "13_1").exists()
     store.close()

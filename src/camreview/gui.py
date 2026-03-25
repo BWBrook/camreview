@@ -7,7 +7,7 @@ from PIL import Image, ImageOps
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import QApplication, QDockWidget, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QStatusBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QStatusBar, QVBoxLayout, QWidget
 
 from .controller import ProjectController
 from .models import FolderRecord, FolderStatus, ImageRecord, ReviewLabel
@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller = ProjectController(region_root)
         self.setWindowTitle(f"camreview — {self.controller.region_root}")
-        self.resize(1600, 980)
+        self.resize(1750, 1040)
 
         self.current_folder_name: str | None = None
         self.current_images: list[ImageRecord] = []
@@ -137,14 +137,12 @@ class MainWindow(QMainWindow):
         self.parse_warning_label.setWordWrap(True)
         self.image_position_label = QLabel("Image: —")
 
-        self.blank_button = QPushButton("Blank [B]")
+        self.blank_button = QPushButton("Reset to Blank [B]")
         self.blank_button.clicked.connect(lambda: self.apply_label(ReviewLabel.BLANK))
         self.animal_button = QPushButton("Animal [A]")
         self.animal_button.clicked.connect(lambda: self.apply_label(ReviewLabel.ANIMAL))
         self.site_photo_button = QPushButton("Site Photo [S]")
         self.site_photo_button.clicked.connect(lambda: self.apply_label(ReviewLabel.SITE_PHOTO))
-        self.clear_button = QPushButton("Clear [0]")
-        self.clear_button.clicked.connect(lambda: self.apply_label(ReviewLabel.UNREVIEWED, auto_advance=False))
 
         self.note_edit = QPlainTextEdit()
         self.note_edit.setPlaceholderText("Optional note or species hint")
@@ -169,7 +167,6 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.blank_button)
         right_layout.addWidget(self.animal_button)
         right_layout.addWidget(self.site_photo_button)
-        right_layout.addWidget(self.clear_button)
         right_layout.addWidget(QLabel("Notes"))
         right_layout.addWidget(self.note_edit, stretch=1)
         right_layout.addWidget(self.undo_button)
@@ -185,28 +182,10 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([240, 980, 340])
+        splitter.setSizes([220, 1200, 290])
 
         self.setCentralWidget(splitter)
         self.setStatusBar(QStatusBar())
-
-        help_dock = QDockWidget("Hotkeys", self)
-        help_dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
-        help_label = QLabel(
-            "Right/Space: next\n"
-            "Left: previous\n"
-            "A: animal\n"
-            "B: blank\n"
-            "S: site photo\n"
-            "0: unreviewed\n"
-            "Cmd+Z: undo\n"
-            "F: fit\n"
-            "1: actual size\n"
-            "Cmd+Return: commit"
-        )
-        help_label.setMargin(8)
-        help_dock.setWidget(help_label)
-        self.addDockWidget(Qt.BottomDockWidgetArea, help_dock)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -225,7 +204,7 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence("A"), self, activated=lambda: self.apply_label(ReviewLabel.ANIMAL)),
             QShortcut(QKeySequence("B"), self, activated=lambda: self.apply_label(ReviewLabel.BLANK)),
             QShortcut(QKeySequence("S"), self, activated=lambda: self.apply_label(ReviewLabel.SITE_PHOTO)),
-            QShortcut(QKeySequence("0"), self, activated=lambda: self.apply_label(ReviewLabel.UNREVIEWED, auto_advance=False)),
+            QShortcut(QKeySequence("0"), self, activated=lambda: self.apply_label(ReviewLabel.BLANK, auto_advance=False)),
             QShortcut(QKeySequence.Undo, self, activated=self.undo_last),
             QShortcut(QKeySequence("F"), self, activated=self.viewer.fit_to_window),
             QShortcut(QKeySequence("1"), self, activated=self.viewer.actual_size),
@@ -300,7 +279,7 @@ class MainWindow(QMainWindow):
             self.current_index = max(0, min(target_index, len(self.current_images) - 1))
         else:
             self.current_index = next(
-                (index for index, image in enumerate(self.current_images) if image.review_label == ReviewLabel.UNREVIEWED),
+                (index for index, image in enumerate(self.current_images) if image.reviewed_at is None),
                 0,
             )
         self._refresh_current_image()
@@ -322,7 +301,8 @@ class MainWindow(QMainWindow):
         self.folder_status_label.setText(
             f"Folder: {folder.folder_name}\n"
             f"Status: {folder.status.value}\n"
-            f"Counts: {folder.animal_count} animal, {folder.blank_count} blank, {folder.site_photo_count} site photo"
+            f"Reviewed: {folder.reviewed_images}/{folder.total_images}\n"
+            f"Tagged: {folder.animal_count} animal, {folder.site_photo_count} site photo"
         )
         self.folder_status_label.setStyleSheet(
             f"color: {STATUS_COLORS[folder.status].name()}; font-weight: 600;"
@@ -333,7 +313,6 @@ class MainWindow(QMainWindow):
         self.blank_button.setEnabled(not readonly)
         self.animal_button.setEnabled(not readonly)
         self.site_photo_button.setEnabled(not readonly)
-        self.clear_button.setEnabled(not readonly)
         self.note_edit.setReadOnly(readonly)
         self.undo_button.setEnabled(not readonly)
 
@@ -347,6 +326,11 @@ class MainWindow(QMainWindow):
             return
 
         image = self.current_images[self.current_index]
+        if image.reviewed_at is None and folder.status not in {FolderStatus.COMMITTED, FolderStatus.DONE, FolderStatus.ERROR}:
+            self.controller.mark_reviewed(image.image_id)
+            folder = self.controller.store.get_folder(self.current_folder_name)
+            self.current_images = self.controller.images(self.current_folder_name)
+            image = self.current_images[self.current_index]
         self.thumbnail_list.blockSignals(True)
         self.thumbnail_list.setCurrentRow(self.current_index)
         self.thumbnail_list.scrollToItem(self.thumbnail_list.item(self.current_index))
@@ -463,6 +447,36 @@ class MainWindow(QMainWindow):
     def cleanup_folder(self) -> None:
         if self.current_folder_name is None:
             return
+        scope = self._choose_cleanup_scope()
+        if scope is None:
+            return
+        if scope == "selected":
+            self._cleanup_selected_folder()
+            return
+        self._cleanup_all_committed()
+
+    def _choose_cleanup_scope(self) -> str | None:
+        committed_count = len(self.controller.cleanup_all_preview())
+        if committed_count <= 1:
+            return "selected"
+        options = ["Selected Folder", f"All Committed ({committed_count})"]
+        selection, ok = QInputDialog.getItem(
+            self,
+            "Cleanup Scope",
+            "Trash residual blanks from the current committed folder, or from all committed folders?",
+            options,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        if selection == options[0]:
+            return "selected"
+        if selection == options[1]:
+            return "all"
+        return None
+
+    def _cleanup_selected_folder(self) -> None:
         try:
             plan = self.controller.cleanup_preview(self.current_folder_name)
         except ValueError as exc:
@@ -489,6 +503,28 @@ class MainWindow(QMainWindow):
         self.refresh_folders()
         if self.current_folder_name == current:
             self.load_folder(current, target_index=0)
+
+    def _cleanup_all_committed(self) -> None:
+        plans = self.controller.cleanup_all_preview()
+        total_files = sum(len(plan.file_relpaths) for plan in plans)
+        lines = [
+            f"Trash residual blanks from all {len(plans)} committed folder(s)?",
+            "",
+            f"This will send {total_files} blank image(s) to the OS Trash and then trash each empty folder.",
+        ]
+        for plan in plans[:10]:
+            lines.append(f"{plan.folder_name}: {len(plan.file_relpaths)} file(s)")
+        if len(plans) > 10:
+            lines.append(f"... and {len(plans) - 10} more folder(s)")
+        reply = QMessageBox.warning(self, "Cleanup All Committed", "\n".join(lines), QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self.controller.cleanup_all_committed()
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
+        self.refresh_folders()
 
     def _show_error(self, message: str) -> None:
         self.statusBar().showMessage(message, 7000)
@@ -527,7 +563,7 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         if event.key() == Qt.Key_0:
-            self.apply_label(ReviewLabel.UNREVIEWED, auto_advance=False)
+            self.apply_label(ReviewLabel.BLANK, auto_advance=False)
             event.accept()
             return
         if event.key() == Qt.Key_F:

@@ -89,7 +89,7 @@ class ProjectStore:
                     parse_warning TEXT,
                     filesize INTEGER NOT NULL,
                     mtime REAL NOT NULL,
-                    review_label TEXT NOT NULL DEFAULT 'unreviewed',
+                    review_label TEXT NOT NULL DEFAULT 'blank',
                     note TEXT NOT NULL DEFAULT '',
                     reviewed_at TEXT
                 );
@@ -103,6 +103,14 @@ class ProjectStore:
                     created_at TEXT NOT NULL
                 );
                 """
+            )
+            conn.execute(
+                """
+                UPDATE images
+                SET review_label = ?
+                WHERE review_label = ?
+                """,
+                (ReviewLabel.BLANK.value, ReviewLabel.UNREVIEWED.value),
             )
 
     def _log_event(
@@ -186,7 +194,7 @@ class ProjectStore:
                                 snapshot.parse_warning,
                                 snapshot.filesize,
                                 snapshot.mtime,
-                                ReviewLabel.UNREVIEWED.value,
+                                ReviewLabel.BLANK.value,
                             ),
                         )
                     else:
@@ -356,11 +364,13 @@ class ProjectStore:
 
     def set_label(self, image_id: int, label: ReviewLabel) -> LabelChange:
         image = self.get_image(image_id)
+        if label == ReviewLabel.UNREVIEWED:
+            label = ReviewLabel.BLANK
         if label == ReviewLabel.SITE_PHOTO and image.review_label == ReviewLabel.ANIMAL:
             raise ValueError("An animal image cannot be marked as the site photo.")
         folder_name = image.folder_name
         before: list[LabelSnapshot] = []
-        reviewed_at = _now() if label != ReviewLabel.UNREVIEWED else None
+        reviewed_at = _now()
         with self.transaction() as conn:
             if label == ReviewLabel.SITE_PHOTO:
                 site_rows = conn.execute(
@@ -409,7 +419,7 @@ class ProjectStore:
                 (label.value, reviewed_at, image_id),
             )
 
-        self._recalculate_folder(folder_name, discover_all_actual_files(self.region_root))
+        self._recalculate_folder(folder_name)
         change = LabelChange(folder_name=folder_name, before=before)
         self._log_event(
             "label",
@@ -423,6 +433,27 @@ class ProjectStore:
         )
         return change
 
+    def mark_reviewed(self, image_id: int) -> None:
+        image = self.get_image(image_id)
+        if image.reviewed_at is not None:
+            return
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE images
+                SET reviewed_at = ?
+                WHERE image_id = ? AND reviewed_at IS NULL
+                """,
+                (_now(), image_id),
+            )
+        self._recalculate_folder(image.folder_name)
+        self._log_event(
+            "reviewed",
+            folder_id=image.folder_id,
+            image_id=image_id,
+            payload={"folder_name": image.folder_name},
+        )
+
     def restore_label_change(self, change: LabelChange) -> None:
         with self.transaction() as conn:
             for snapshot in change.before:
@@ -434,7 +465,7 @@ class ProjectStore:
                     """,
                     (snapshot.label.value, snapshot.reviewed_at, snapshot.image_id),
                 )
-        self._recalculate_folder(change.folder_name, discover_all_actual_files(self.region_root))
+        self._recalculate_folder(change.folder_name)
         self._log_event(
             "undo_label",
             folder_id=self._folder_id(change.folder_name),
@@ -560,6 +591,16 @@ class ProjectStore:
             file_relpaths=sorted(file_relpaths),
         )
 
+    def list_committed_folder_names(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT folder_name FROM folders WHERE status = ? ORDER BY folder_name",
+            (FolderStatus.COMMITTED.value,),
+        ).fetchall()
+        return [row["folder_name"] for row in rows]
+
+    def preview_cleanup_all_committed(self) -> list[CleanupPlan]:
+        return [self.preview_cleanup(folder_name) for folder_name in self.list_committed_folder_names()]
+
     def cleanup_folder(self, folder_name: str) -> CleanupPlan:
         plan = self.preview_cleanup(folder_name)
         for relpath in plan.file_relpaths:
@@ -586,7 +627,13 @@ class ProjectStore:
         )
         return plan
 
-    def _recalculate_folder(self, folder_name: str, actual_files: dict[str, FileSnapshot]) -> None:
+    def cleanup_all_committed(self) -> list[CleanupPlan]:
+        plans: list[CleanupPlan] = []
+        for folder_name in self.list_committed_folder_names():
+            plans.append(self.cleanup_folder(folder_name))
+        return plans
+
+    def _recalculate_folder(self, folder_name: str, actual_files: dict[str, FileSnapshot] | None = None) -> None:
         folder_id = self._folder_id(folder_name)
         rows = self._conn.execute(
             """
@@ -599,7 +646,7 @@ class ProjectStore:
         ).fetchall()
         images = [self._row_to_image(row) for row in rows]
         total_images = len(images)
-        reviewed_images = sum(1 for image in images if image.review_label != ReviewLabel.UNREVIEWED)
+        reviewed_images = sum(1 for image in images if image.reviewed_at is not None)
         animal_count = sum(1 for image in images if image.review_label == ReviewLabel.ANIMAL)
         blank_count = sum(1 for image in images if image.review_label == ReviewLabel.BLANK)
         site_photo_count = sum(1 for image in images if image.review_label == ReviewLabel.SITE_PHOTO)
@@ -608,11 +655,18 @@ class ProjectStore:
         error_message: str | None = None
         status = FolderStatus.PENDING
 
-        missing_current = [
-            image.current_relpath
-            for image in images
-            if image.current_relpath and image.current_relpath not in actual_files
-        ]
+        if actual_files is None:
+            missing_current = [
+                image.current_relpath
+                for image in images
+                if image.current_relpath and not (self.region_root / image.current_relpath).exists()
+            ]
+        else:
+            missing_current = [
+                image.current_relpath
+                for image in images
+                if image.current_relpath and image.current_relpath not in actual_files
+            ]
         if missing_current:
             error_message = "Tracked files are missing or were moved outside camreview."
             status = FolderStatus.ERROR
@@ -651,7 +705,6 @@ class ProjectStore:
                     image.review_label == ReviewLabel.SITE_PHOTO
                     and image.current_relpath == f"{SITE_PHOTO_DIRNAME}/{image.filename}"
                 )
-                or image.review_label == ReviewLabel.UNREVIEWED
                 for image in images
             )
             if committed_layout and reviewed_images == total_images and site_photo_count == 1:

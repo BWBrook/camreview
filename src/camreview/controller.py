@@ -38,6 +38,9 @@ class ProjectController:
         change = self.store.set_label(image_id, label)
         self._undo_history[image.folder_name].append(change)
 
+    def mark_reviewed(self, image_id: int) -> None:
+        self.store.mark_reviewed(image_id)
+
     def undo_last(self, folder_name: str) -> bool:
         history = self._undo_history[folder_name]
         if not history:
@@ -59,7 +62,15 @@ class ProjectController:
     def cleanup_preview(self, folder_name: str) -> CleanupPlan:
         return self.store.preview_cleanup(folder_name)
 
+    def cleanup_all_preview(self) -> list[CleanupPlan]:
+        return self.store.preview_cleanup_all_committed()
+
     def cleanup_folder(self, folder_name: str) -> CleanupPlan:
         self._undo_history[folder_name].clear()
         return self.store.cleanup_folder(folder_name)
 
+    def cleanup_all_committed(self) -> list[CleanupPlan]:
+        committed = self.store.list_committed_folder_names()
+        for folder_name in committed:
+            self._undo_history[folder_name].clear()
+        return self.store.cleanup_all_committed()
