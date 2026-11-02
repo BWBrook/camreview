@@ -1,5 +1,7 @@
 # camreview
 
+> **Status:** developed in the open as a working record. This is work in progress: contents may change, and nothing here is peer-reviewed unless stated.
+
 Camreview is a PySide6 desktop app for first-pass review of wildlife camera images.
 
 It is designed for a narrow, safe workflow:
@@ -35,3 +37,7 @@ uv run pytest
 uv run ruff check .
 ```
 
+
+## Licence
+
+Code is released under the [MIT Licence](LICENSE). Text, figures and data created for this project are released under [CC BY-SA 4.0](LICENSE-CONTENT). Third-party material keeps its own terms where stated.
